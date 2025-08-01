@@ -48,7 +48,7 @@ DATA_FOLDER = Path("./data")        # adapt if your files reside elsewhere
 FILE_DATA1          = DATA_FOLDER / "data1.xlsx"
 FILE_OPEN_BALANCES  = DATA_FOLDER / "open_Balance.xlsx"
 FILE_PARTA_RESULTS  = DATA_FOLDER / "partA_output.xlsx"
-FILE_OUTPUT         = "IAS19_partB_results.xlsx"
+FILE_OUTPUT         = "IAS19_part2_results.xlsx"
 REPORT_DATE         = pd.Timestamp("2024-12-31")
 RET_AGE_M, RET_AGE_F = 67, 64  # statutory retirement ages in Israel
 ###########################################################################
@@ -80,7 +80,7 @@ def load_employees(path: str | Path = FILE_DATA1) -> pd.DataFrame:
     # Basic cleaning / typing
     date_cols = ["date_of_birth", "start_work_date", "leave_date"]
     for c in date_cols:
-        df[c] = pd.to_datetime(df[c], errors="coerce", dayfirst=True)
+        df[c] = pd.to_datetime(df[c], errors="coerce", format="%d/%m/%Y")
 
     num_cols = ["LastSalary", "Section14Pct", "withdrawal_from_assets",
                 "completion_by_cheque", "deposits", "Assets_close"]
@@ -127,8 +127,8 @@ def load_partA_results(path: str | Path = FILE_PARTA_RESULTS) -> pd.DataFrame:
 
 
 def load_discount_curve(path: str | Path = FILE_DATA1) -> pd.DataFrame:
-    """Sheet "הנחות" – columns: Year, DiscountRate (as decimal, e.g. 0.0253)."""
-    df = pd.read_excel(path, sheet_name="הנחות")
+    """Sheet "היוון" – columns: Year, DiscountRate (as decimal, e.g. 0.0253)."""
+    df = pd.read_excel(path, sheet_name="היוון")
     mapper = {
         df.columns[0]: "Year",
         df.columns[1]: "DiscountRate",
@@ -173,7 +173,7 @@ def enrich_calculations(df: pd.DataFrame, curve: pd.DataFrame) -> pd.DataFrame:
 
     # 3.2 Actuarial factor
     divisor = df["LastSalary"] * df["Seniority"] * (1 - df["Section14Pct"])
-    df["ActFactor"] = df["PV_close"] / divisor.replace({0: pd.NA})
+    df["ActFactor"] = df["PV_close"] / divisor.replace({0: pd.NA}) # ----> לבדוק את השורה הזו !!!!!!!!!!!
 
     # 3.3 Service Cost (SC)
     df["SC"] = (
@@ -184,8 +184,8 @@ def enrich_calculations(df: pd.DataFrame, curve: pd.DataFrame) -> pd.DataFrame:
     df["YearsLeft"] = df.apply(years_of_future_service, axis=1)
     df["DiscRate"]  = df["YearsLeft"].apply(lambda y: lookup_discount_rate(y, curve))
 
-    # Formula per lecture: IC = [PV_open + (SC – BenefitsPaid)/2] × DiscRate
-    df["IC"] = (df["PV_open"] + (df["SC"] - df["BenefitsPaid"])/2) * df["DiscRate"]
+    # Formula per lecture: IC = [(PV_open * DiscRate) + ((SC – BenefitsPaid) × (DiscRate/2)) ]
+    df["IC"] = ((df["PV_open"]* df["DiscRate"]) + ((df["SC"] - df["BenefitsPaid"])) * (df["DiscRate"]/2))
 
     # 3.5 Liability actuarial gain / loss
     df["LiabGainLoss"] = (
@@ -193,7 +193,7 @@ def enrich_calculations(df: pd.DataFrame, curve: pd.DataFrame) -> pd.DataFrame:
     )
 
     # 3.6 Expected return on assets (same rate as discount unless curve has separate column)
-    df["ER"] = (df["Assets_open"] + (df["deposits"] - df["withdrawal_from_assets"])/2) * df["DiscRate"]
+    df["ER"] = ((df["Assets_open"] * df["DiscRate"]) + ((df["deposits"] - df["withdrawal_from_assets"]) * (df["DiscRate"]/2)))
 
     # 3.7 Asset actuarial gain / loss
     df["AssetGainLoss"] = (
@@ -229,12 +229,32 @@ def main():
         "Assets_open", "ER", "deposits", "withdrawal_from_assets",
         "AssetGainLoss", "Assets_close",
     ]
+
+    # --------- changing column to hebrew for better excel file -----
+    rename_dict = {
+        "employee_id": "מספר עובד",
+        "PV_open": "יתרת פתיחה",
+        "SC": "עלות שירות שוטף",
+        "IC": "עלות היוון",
+        "BenefitsPaid": "הטבות ששולמו",
+        "LiabGainLoss": "הפסד אקטוארי",
+        "PV_close": "יתרת סגירה",
+        "ActFactor": "פקטור אקטוארי",
+        "Assets_open": "יתרת פתיחה.1",
+        "ER": "תשואה צפויה",
+        "deposits": "הפקדות",
+        "withdrawal_from_assets": "הטבות ששולמו מנכסים",
+        "AssetGainLoss": "רווח אקטוארי",
+        "Assets_close": "יתרת סגירה.1",
+    }
+
     desired_order = obligation_cols + asset_cols
 
-    df_out = df[desired_order].sort_values("employee_id")
+    df_out = df[desired_order].rename(columns=rename_dict).sort_values("מספר עובד")
     df_out.to_excel(FILE_OUTPUT, index=False)
     print(f"✓ Results exported → {FILE_OUTPUT}  (rows: {len(df_out)})")
 
 
 if __name__ == "__main__":
     main()
+    
