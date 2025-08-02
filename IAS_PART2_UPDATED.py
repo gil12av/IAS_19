@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+
 """
 IAS 19 – Part B: Annual roll‑forward (Service Cost, Interest Cost, Actuarial G/L)
 ────────────────────────────────────────────────────────────────────────────
