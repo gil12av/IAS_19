@@ -1,288 +1,263 @@
+
 """
-IAS 19 – Part B: דוח שנתי אקטוארי (Service Cost, Interest Cost, Gain/Loss)
-----------------------------------------
-תהליך מלא:
-1. טוען 'data1.xlsx' גליון 'data' – נתוני עובדים (start, leave, משיכות נכסים, השלמות צ’ק).
-2. בוחר רק את הרשומה העדכנית (במקרה של כפילויות).
-3. טוען 'open_Balance.xlsx' גליון 'Sheet1' – יתרות פתיחה (PV_open, Assets_open).
-4. טוען 'results.xlsx' – פלט Part A (PV_close, LastSalary, Seniority, Section14Pct, Age_31_12_2024).
-5. טוען 'data1.xlsx' גליון 'הנחות' – עקום שיעורי היוון לפי שנות שירות.
-6. מאחד את כל ה-DataFrame’s לפי employee_id.
-7. מחשב חלק השנה (fraction_2024) לפי start_work_date / leave_date.
-8. מחשב Actuarial Factor.
-9. מחשב Service Cost.
-10. בוחר שיעור היוון ע"פ שנות שארית שירות.
-11. מחשב Interest Cost.
-12. מחשב רווח/הפסד אקטוארי – התחייבות.
-13. מייצא תוצאה ל-'IAS19_partB_results.xlsx'.
+IAS 19 – Part B: Annual roll‑forward (Service Cost, Interest Cost, Actuarial G/L)
+────────────────────────────────────────────────────────────────────────────
+This script builds on the results of Part A (present value of the obligation
+at 31‑12‑2024) and the opening balances to produce the movement schedule
+required for the financial statements.
+
+Required input files (all in the same folder as the script unless a full
+path is supplied):
+• data1.xlsx                – two sheets:
+    ‑ "data"       : employee master file (see README below)
+    ‑ "הנחות"      : discount‑rate yield curve (columns: Year, DiscountRate)
+• open_Balance.xlsx         – opening balances (columns: employee_id, PV_open, Assets_open)
+• partA_output.xlsx         – Part A results (columns: employee_id, PV_close)
+
+Output:
+• IAS19_partB_results.xlsx  – one sheet with the precise column layout you
+  provided (obligation section on the left, assets section on the right).
+
+README – mandatory columns in sheet "data" (header row is row 2 → header=1):
+ 0 "מספר עובד"          ⇒ employee_id (unique key)
+ 3 "מין"                 ⇒ gender  ("M"/"F") – determines retirement age 67/64
+ 4 "תאריך לידה"          ⇒ date_of_birth (dd/mm/yyyy)
+ 5 "תאריך תחילת עבודה"  ⇒ start_work_date
+ 6 "שכר "                ⇒ LastSalary (ILS)
+ 7 "תאריך  קבלת סעיף 14" ⇒ section14_start_date (not needed but useful)
+ 8 "אחוז סעיף 14"        ⇒ Section14Pct (e.g. 100, 72 …) /100 will be used
+ 9 "שווי נכס"            ⇒ Assets_close (fair value at year‑end, if known)
+10 "הפקדות"              ⇒ deposits (employer and employee contributions 2024)
+11 "תאריך עזיבה "        ⇒ leave_date (dd/mm/yyyy or "-"/blank if active)
+12 "תשלום מהנכס"        ⇒ withdrawal_from_assets (benefits paid from plan assets)
+13 "השלמה בצ'ק"          ⇒ completion_by_cheque (benefits paid directly by employer)
+
+Feel free to rename columns in Excel – just adjust the mapping dictionaries
+below accordingly.
 """
 
+from __future__ import annotations
 import pandas as pd
 from datetime import datetime
-import os
+from pathlib import Path
+import numpy as np
 
-# ----------------------------
-# 1. Load data1 (גליון data)
-# ----------------------------
-def load_data1(path="data/data1.xlsx"):
-    """
-    טוען גליון 'data' מ-data1.xlsx, header=1, ממפה עמודות:
-      employee_id, start_work_date, leave_date,
-      asset_withdrawal, check_completion
-    בוחר את הרשומה האחרונה לכל עובד (במקרה של כפילויות).
-    """
+###########################################################################
+# 0. CONFIGURATION ########################################################
+###########################################################################
+DATA_FOLDER = Path("./data")        # adapt if your files reside elsewhere
+FILE_DATA1          = DATA_FOLDER / "data1.xlsx"
+FILE_OPEN_BALANCES  = DATA_FOLDER / "open_Balance.xlsx"
+FILE_PARTA_RESULTS  = DATA_FOLDER / "partA_output.xlsx"
+FILE_OUTPUT         = "IAS19_part2_results.xlsx"
+REPORT_DATE         = pd.Timestamp("2024-12-31")
+RET_AGE_M, RET_AGE_F = 67, 64  # statutory retirement ages in Israel
+###########################################################################
+
+############################################################################
+# 1. LOAD INPUTS ###########################################################
+############################################################################
+
+def load_employees(path: str | Path = FILE_DATA1) -> pd.DataFrame:
+    """Load *sheet "data"* from **data1.xlsx** and standardise column names."""
     df = pd.read_excel(path, sheet_name="data", header=1)
-  
-    # מיפוי שמות עמודות
-    df = df.rename(columns={
-        df.columns[0]:  "employee_id",
-        df.columns[3]:  "gender",
-        df.columns[4]:  "date_of_birth",
-        df.columns[5]:  "start_work_date",
-        df.columns[6]:  "LastSalary",
-        df.columns[8]:  "Section14Pct",
-        df.columns[11]: "leave_date",
-        df.columns[12]: "asset_withdrawal",
-        df.columns[13]: "check_completion",
-    })
-    # המרה לתאריכים
-    df["start_work_date"] = pd.to_datetime(df["start_work_date"], dayfirst=True, errors="coerce")
-    df["leave_date"]      = pd.to_datetime(df["leave_date"], dayfirst=True, errors="coerce")
-    df["date_of_birth"]   = pd.to_datetime(df["date_of_birth"], dayfirst=True, errors="coerce")
-   
-    # חישוב ותק ל־31.12.2024
-    ref_date = pd.Timestamp("2024-12-31")
-    df["Seniority"] = ((ref_date - df["start_work_date"]).dt.days / 365).fillna(0).astype(int)
 
-    # חישוב גיל ל־31.12.2024
-    df["Age_31_12_2024"] = ((ref_date - df["date_of_birth"]).dt.days / 365).fillna(0).astype(int)
+    # Column mapping – adjust indices/names only if the Excel layout changes
+    mapper = {
+        "מספר עובד": "employee_id",
+        "מין": "gender",
+        "תאריך לידה": "date_of_birth",
+        "תאריך תחילת עבודה ": "start_work_date",
+        "שכר ": "LastSalary",
+        "אחוז סעיף 14": "Section14Pct",
+        "תאריך עזיבה ": "leave_date",
+        "תשלום מהנכס": "withdrawal_from_assets",
+        "השלמה בצ'ק": "completion_by_cheque",
+        "הפקדות": "deposits",
+        "שווי נכס": "Assets_close",  # value at 31‑12‑2024 if provided
+    }
+    df = df.rename(columns=mapper)
 
-    # חישוב BenefitsPaid
-    df["BenefitsPaid"] = df["asset_withdrawal"].fillna(0) + df["check_completion"].fillna(0)
-   
-    # בוחר הרשומה ה"עדכנית" ביותר לכל employee_id
-    df = df.sort_values("start_work_date").drop_duplicates("employee_id", keep="last")
-    
-      # החזרת שדות רלוונטיים
-    return df[[
-        "employee_id",
-        "gender",
-        "start_work_date",
-        "leave_date",
-        "LastSalary",
-        "Section14Pct",
-        "Seniority",
-        "Age_31_12_2024",
-        "BenefitsPaid"
-    ]]
+    # Basic cleaning / typing
+    date_cols = ["date_of_birth", "start_work_date", "leave_date"]
+    for c in date_cols:
+        df[c] = pd.to_datetime(df[c], errors="coerce", format="%d/%m/%Y")
 
-# ---------------------------------------
-# 2. Load opening balances (גליון Sheet1)
-# ---------------------------------------
-def load_open_balance(path="data/open_Balance.xlsx"):
-    """
-    טוען Sheet1 מ-open_Balance.xlsx:
-      מספר עובד, ערך נוכחי התחייבות, שווי הוגן
-    ממפה ל-employee_id, PV_open, Assets_open
-    """
-    df = pd.read_excel(path, sheet_name="Sheet1")
-    df = df.rename(columns={
+    num_cols = ["LastSalary", "Section14Pct", "withdrawal_from_assets",
+                "completion_by_cheque", "deposits", "Assets_close"]
+    df[num_cols] = df[num_cols].fillna(0)
+
+    # Section 14: convert 100 ⇒ 1.00, 72 ⇒ 0.72 …
+    df["Section14Pct"] = df["Section14Pct"] / 100.0
+
+    # Choose the latest record per employee in case of duplicates
+    df = (
+        df.sort_values("start_work_date")
+          .drop_duplicates(subset="employee_id", keep="last")
+          .reset_index(drop=True)
+    )
+
+    # Derived fields
+    df["Age_31_12_2024"] = ((REPORT_DATE - df["date_of_birth"]).dt.days / 365.25)
+    df["Seniority"]      = ((REPORT_DATE - df["start_work_date"]).dt.days / 365.25)
+
+    # Benefits paid by employer (liability side)
+    df["BenefitsPaid"] = df["withdrawal_from_assets"] + df["completion_by_cheque"]
+
+    return df
+
+
+def load_opening_balances(path: str | Path = FILE_OPEN_BALANCES) -> pd.DataFrame:
+    """Sheet 1 must contain columns: employee_id, PV_open, Assets_open."""
+    df = pd.read_excel(path, sheet_name=0)
+    mapper = {
         "מספר עובד": "employee_id",
         "ערך נוכחי התחייבות": "PV_open",
         "שווי הוגן": "Assets_open",
-    })
-    return df[["employee_id","PV_open","Assets_open"]]
+    }
+    df = df.rename(columns=mapper)
+    return df[["employee_id", "PV_open", "Assets_open"]]
 
-# ----------------------------------------
-# 3. Load Part A results (results.xlsx)
-# ----------------------------------------
-def load_partA(path="data/partA_output.xlsx"):
-    """
-    טוען פלט Part A (partA_output.xlsx):
-    - employee_id
-    - liability (ממופה ל־PV_close)
-    """
+
+def load_partA_results(path: str | Path = FILE_PARTA_RESULTS) -> pd.DataFrame:
+    """Part A results – columns: employee_id, liability."""
     df = pd.read_excel(path)
+    if "liability" not in df.columns:
+        raise ValueError("partA_output.xlsx must contain a column named 'liability'.")
+    return df.rename(columns={"liability": "PV_close"})[["employee_id", "PV_close"]]
 
-    # שינוי שם עמודה ראשונה אם צריך
-    if "employee_id" not in df.columns:
-        df = df.rename(columns={df.columns[0]: "employee_id"})
 
-    # שינוי עמודת liability לשם אחיד
-    df = df.rename(columns={"liability": "PV_close"})
-
-    # מחזירים רק את השדות הדרושים
-    return df[["employee_id", "PV_close"]]
-
-# --------------------------------------------------
-# 4. Load discount rate assumptions (גליון הנחות)
-# --------------------------------------------------
-def load_assumptions(path="data/data1.xlsx"):
-    """
-    טוען גליון 'הנחות' מ-data1.xlsx:
-      עמודות: שנה, שיעור היוון
-    ממפה ל-Year, DiscountRate
-    """
+def load_discount_curve(path: str | Path = FILE_DATA1) -> pd.DataFrame:
+    """Sheet "היוון" – columns: Year, DiscountRate (as decimal, e.g. 0.0253)."""
     df = pd.read_excel(path, sheet_name="היוון")
-    df = df.rename(columns={
-    "year": "Year",
-    "discountRate" : "DiscountRate"
-    })
+    mapper = {
+        df.columns[0]: "Year",
+        df.columns[1]: "DiscountRate",
+    }
+    df = df.rename(columns=mapper)
+    return df[["Year", "DiscountRate"]]
 
-    return df[["Year","DiscountRate"]]
+############################################################################
+# 2. HELPER FUNCTIONS ######################################################
+############################################################################
 
-# ---------------------------
-# 5. Merge all DataFrames
-# ---------------------------
-def merge_all(df1, dfA, dfO):
-    """
-    מאחד: df1 (data1), dfA (Part A), dfO (opening balances)
-    לפי employee_id.
-    """
-    df = df1.merge(dfA, on="employee_id")\
-            .merge(dfO, on="employee_id")
-    return df
+def years_of_future_service(row: pd.Series) -> float:
+    """Expected future service from 31‑12‑2024 to statutory retirement age."""
+    retirement_age = RET_AGE_F if row["gender"].strip().upper() == "F" else RET_AGE_M
+    return max(retirement_age - row["Age_31_12_2024"], 0)
 
-# ---------------------------------
-# 6. Compute fraction of 2024
-# ---------------------------------
-def calc_fraction_2024(df):
-    """
-    מוסיף עמודה fraction_2024:
-      0 אם left_date < 1/1/2024;
-      1 אם still employed בסוף 2024;
-      אחרת days/365.
-    """
-    start_2024 = datetime(2024,1,1)
-    end_2024   = datetime(2024,12,31)
 
-    def frac(row):
-        ld = row["leave_date"]
-        sd = row["start_work_date"]
-        # left before 2024
-        if pd.notna(ld) and ld < start_2024:
+def lookup_discount_rate(years_left: float, curve: pd.DataFrame) -> float:
+    """Nearest *lower or equal* tenor – if years_left<min(year) take the first."""
+    eligible = curve[curve["Year"] <= years_left]
+    if eligible.empty:
+        return curve.iloc[0]["DiscountRate"]
+    return eligible.sort_values("Year", ascending=False).iloc[0]["DiscountRate"]
+
+############################################################################
+# 3. CALCULATION STEPS #####################################################
+############################################################################
+
+def enrich_calculations(df: pd.DataFrame, curve: pd.DataFrame) -> pd.DataFrame:
+    # 3.1 fraction of the year worked in 2024
+    start_2024 = pd.Timestamp("2024-01-01")
+    end_2024   = REPORT_DATE
+
+    def fraction_2024(row):
+        if pd.notna(row["leave_date"]) and row["leave_date"] < start_2024:
             return 0.0
-        # start of work window
-        ws = sd if sd > start_2024 else start_2024
-        # end of work window
-        we = ld if pd.notna(ld) and ld < end_2024 else end_2024
-        days = (we - ws).days + 1
-        return max(0, min(days, 365)) / 365.0
+        work_start = max(start_2024, row["start_work_date"])
+        work_end   = min(end_2024, row["leave_date"]) if pd.notna(row["leave_date"]) else end_2024
+        return (work_end - work_start).days / 365.25
 
-    df["fraction_2024"] = df.apply(frac, axis=1)
-    return df
+    df["fraction_2024"] = df.apply(fraction_2024, axis=1)
 
-# ---------------------------
-# 7. Actuarial Factor
-# ---------------------------
-def calc_actuarial_factor(df):
-    """
-    מוסיף עמודה ActFactor:
-      PV_close / (LastSalary * Seniority * (1 - Section14Pct))
-    """
-    df["ActFactor"] = (
-        df["PV_close"] /
-        (df["LastSalary"] * df["Seniority"] * (1 - df["Section14Pct"]))
+    # 3.2 Actuarial factor
+    divisor = df["LastSalary"] * df["Seniority"] * (1 - df["Section14Pct"])
+    df["ActFactor"] = df["PV_close"] / divisor.replace({0: pd.NA}) # ----> לבדוק את השורה הזו !!!!!!!!!!!
+
+    # 3.3 Service Cost (SC)
+    df["SC"] = np.where(
+            df["Section14Pct"] == 1, # אם סעיף 14 הוא 100 אז העלות שירות שוטף צריך להתאפס
+            0,
+            df["LastSalary"] * df["fraction_2024"] * (1 - df["Section14Pct"]) * df["ActFactor"]
     )
-    return df
 
-# -------------------------------------------------
-# 8. Service Cost (עלות שירות שוטף)
-# -------------------------------------------------
-def calc_service_cost(df):
-    """
-    מוסיף עמודה SC:
-      LastSalary * fraction_2024 * (1 - Section14Pct) * ActFactor
-    """
-    df["SC"] = (
-        df["LastSalary"] *
-        df["fraction_2024"] *
-        (1 - df["Section14Pct"]) *
-        df["ActFactor"]
-    )
-    return df
+    # 3.4 Discount rate & Interest Cost (IC)
+    df["YearsLeft"] = df.apply(years_of_future_service, axis=1)
+    df["DiscRate"]  = df["YearsLeft"].apply(lambda y: lookup_discount_rate(y, curve))
 
-# -------------------------------------------------
-# 9. Lookup Discount Rate by years left
-# -------------------------------------------------
-def lookup_discount_rate(years_left, df_assump):
-    """
-    מחזיר DiscountRate מתאימה ל-years_left:
-    העולה על השנה הקרובה ביותר אך לא יותר ממנה.
-    """
-    # בוחרים את השורות שה-Year <= years_left
-    df = df_assump[df_assump["Year"] <= years_left]
-    if df.empty:
-        return None
-    # הסדר יורד ובחירה בראשונה
-    return df.sort_values("Year", ascending=False).iloc[0]["DiscountRate"]
+    # Formula per lecture: IC = [(PV_open * DiscRate) + ((SC – BenefitsPaid) × (DiscRate/2)) ]
+    df["IC"] = ((df["PV_open"]* df["DiscRate"]) + ((df["SC"] - df["BenefitsPaid"])) * (df["DiscRate"]/2))
 
-# -------------------------------------------------
-# 10. Interest Cost (עלות היוון)
-# -------------------------------------------------
-def calc_interest_cost(df, df_assump):
-    """
-    מוסיף עמודות DiscRate, IC:
-      DiscRate = lookup_discount_rate(retirement_age - Age_31_12_2024)
-      IC = (PV_open + SC - BenefitsPaid/2) * DiscRate
-    """
-    def get_rate(row):
-        ret_age = 64 if row["Age_31_12_2024"] == "F" else 67
-        years_left = ret_age - row["Age_31_12_2024"]
-        return lookup_discount_rate(years_left, df_assump)
-
-    df["DiscRate"] = df.apply(get_rate, axis=1)
-    df["IC"] = (
-        (df["PV_open"] + df["SC"] - df["BenefitsPaid"]/2) *
-        df["DiscRate"]
-    )
-    return df
-
-# -------------------------------------------------
-# 11. Liability Actuarial Gain/Loss
-# -------------------------------------------------
-def calc_liability_gain_loss(df):
-    """
-    מוסיף עמודה LiabGainLoss:
-      PV_close - PV_open - SC - IC + BenefitsPaid
-    """
+    # 3.5 Liability actuarial gain / loss
     df["LiabGainLoss"] = (
-        df["PV_close"] - df["PV_open"]
-        - df["SC"] - df["IC"] + df["BenefitsPaid"]
+        df["PV_close"] - df["PV_open"] - df["SC"] - df["IC"] + df["BenefitsPaid"]
     )
+
+    # 3.6 Expected return on assets (same rate as discount unless curve has separate column)
+    df["ER"] = ((df["Assets_open"] * df["DiscRate"]) + ((df["deposits"] - df["withdrawal_from_assets"]) * (df["DiscRate"]/2)))
+
+    # 3.7 Asset actuarial gain / loss
+    df["AssetGainLoss"] = (
+        df["Assets_close"] - df["Assets_open"] - df["ER"] - df["deposits"] + df["withdrawal_from_assets"]
+    )
+
     return df
 
-# ---------------------------
-# 12. Main
-# ---------------------------
+############################################################################
+# 4. MAIN AND EXPORT ######################################################
+############################################################################
+
 def main():
-    # Load inputs
-    df1    = load_data1("data/data1.xlsx")
-    dfO    = load_open_balance("data/open_Balance.xlsx")
-    dfA    = load_partA("data/partA_output.xlsx")
-    dfAss  = load_assumptions("data/data1.xlsx")
+    # ---------- load data ----------
+    df_emp  = load_employees()
+    df_open = load_opening_balances()
+    df_A    = load_partA_results()
+    curve   = load_discount_curve()
 
-    # Merge
-    df = merge_all(df1, dfA, dfO)
+    # ---------- merge ----------
+    df = (df_emp.merge(df_open, on="employee_id", how="left")
+                  .merge(df_A,    on="employee_id", how="left"))
 
-    # Part B calculations
-    print(df.dtypes)
-    df = calc_fraction_2024(df)
-    df = calc_actuarial_factor(df)
-    df = calc_service_cost(df)
-    df = calc_interest_cost(df, dfAss)
-    df = calc_liability_gain_loss(df)
+    # ---------- calculate ----------
+    df = enrich_calculations(df, curve)
 
-    # Export
-    cols = [
-        "employee_id", "PV_open", "PV_close",
-        "ActFactor", "SC", "DiscRate", "IC",
-        "BenefitsPaid", "LiabGainLoss"
+    # ---------- column order & export ----------
+    obligation_cols = [
+        "employee_id", "PV_open", "SC", "IC", "BenefitsPaid",
+        "LiabGainLoss", "PV_close", "ActFactor",
     ]
-    df[cols].to_excel("IAS19(partB)-results.xlsx", index=False)
-    print("IAS19 Part B report exported to IAS19_partB_results.xlsx")
+    asset_cols = [
+        "Assets_open", "ER", "deposits", "withdrawal_from_assets",
+        "AssetGainLoss", "Assets_close",
+    ]
+
+    # --------- changing column to hebrew for better excel file -----
+    rename_dict = {
+        "employee_id": "מספר עובד",
+        "PV_open": "יתרת פתיחה",
+        "SC": "עלות שירות שוטף",
+        "IC": "עלות היוון",
+        "BenefitsPaid": "הטבות ששולמו",
+        "LiabGainLoss": "הפסד אקטוארי",
+        "PV_close": "יתרת סגירה",
+        "ActFactor": "פקטור אקטוארי",
+        "Assets_open": "יתרת פתיחה.1",
+        "ER": "תשואה צפויה",
+        "deposits": "הפקדות",
+        "withdrawal_from_assets": "הטבות ששולמו מנכסים",
+        "AssetGainLoss": "רווח אקטוארי",
+        "Assets_close": "יתרת סגירה.1",
+    }
+
+    desired_order = obligation_cols + asset_cols
+
+    df_out = df[desired_order].rename(columns=rename_dict).sort_values("מספר עובד")
+    df_out.to_excel(FILE_OUTPUT, index=False)
+    print(f"✓ Results exported → {FILE_OUTPUT}  (rows: {len(df_out)})")
 
 
 if __name__ == "__main__":
     main()
-
+    

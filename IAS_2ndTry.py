@@ -40,22 +40,49 @@ from __future__ import annotations
 import pandas as pd
 from datetime import datetime
 from pathlib import Path
+import numpy as np
+
+# --- לוחות תמותה והסתברויות עזיבה ---
+from EconomicModel_V5 import (
+    read_male_mortality_table,
+    read_Female_mortality_table,
+    leave_probabilities
+)
+
+# שימוש בטבלאות מחלק א לחישוב התוחלת לשיעור ההיוון 
+_, _, male_mortality_table_age_Qx = read_male_mortality_table()
+_, _, Female_mortality_table_age_Qx = read_Female_mortality_table()
+
+
 
 ###########################################################################
 # 0. CONFIGURATION ########################################################
 ###########################################################################
-DATA_FOLDER = Path("./data")        # adapt if your files reside elsewhere
+DATA_FOLDER = Path("./data")        # מיקום התיקייה data
 FILE_DATA1          = DATA_FOLDER / "data1.xlsx"
 FILE_OPEN_BALANCES  = DATA_FOLDER / "open_Balance.xlsx"
 FILE_PARTA_RESULTS  = DATA_FOLDER / "partA_output.xlsx"
-FILE_OUTPUT         = "IAS19_part2_results.xlsx"
+FILE_OUTPUT         = "Part2_Results.xlsx"
 REPORT_DATE         = pd.Timestamp("2024-12-31")
-RET_AGE_M, RET_AGE_F = 67, 64  # statutory retirement ages in Israel
+RET_AGE_M, RET_AGE_F = 67, 64  # גיל הפרישה לנשים וגברים 
+
 ###########################################################################
 
 ############################################################################
 # 1. LOAD INPUTS ###########################################################
 ############################################################################
+
+def get_death_prob(age, gender):
+    return female_q.get(age, 0.0) if gender.upper() == "F" else male_q.get(age, 0.0)
+
+def get_quit_prob(age: int) -> float:
+    # נחזיר את הסך הכולל (עזיבה מכל סיבה)
+    if 18 <= age <= 29: return 0.25
+    if 30 <= age <= 39: return 0.16
+    if 40 <= age <= 49: return 0.13
+    if 50 <= age <= 59: return 0.09
+    if 60 <= age <= 67: return 0.06
+    return 0.0
 
 def load_employees(path: str | Path = FILE_DATA1) -> pd.DataFrame:
     """Load *sheet "data"* from **data1.xlsx** and standardise column names."""
@@ -146,12 +173,65 @@ def years_of_future_service(row: pd.Series) -> float:
     return max(retirement_age - row["Age_31_12_2024"], 0)
 
 
+
+# פונקציה לחישוב תוחלת לשיעור ההיוון
+def compute_service_expectancy_survival_based(age: float, gender: str) -> float:
+    """חישוב תוחלת שירות לפי מכפלת הסתברויות הישרדות בלבד ."""
+    expectancy = 0.0
+    survival_prob = 1.0
+    retirement_age = 64 if gender.strip().upper() == "F" else 67
+    print(f"\n----- חישוב תוחלת שירות לעובד בן {int(age)} ({gender}) -----")
+    
+    for t in range(1, int(retirement_age - age) + 1):
+        curr_age = int(age) + t
+
+        # הסתברויות
+        q_quit = leave_probabilities(curr_age, "total")
+        q_death = Female_mortality_table_age_Qx.get(curr_age, 0.0) if gender.strip().upper() == "F" else male_mortality_table_age_Qx.get(curr_age, 0.0)
+
+        # הסתברות הישרדות לשנה הזו
+        P_survive = 1 - q_quit - q_death
+        survival_prob *= P_survive
+
+        # הוספה לסכום התוחלת
+        expectancy += survival_prob
+
+    print(f"🟩 תוחלת סופית: {expectancy:.4f}\n")
+    return expectancy
+
+
 def lookup_discount_rate(years_left: float, curve: pd.DataFrame) -> float:
-    """Nearest *lower or equal* tenor – if years_left<min(year) take the first."""
+    """בחר את שיעור ההיוון הקרוב ביותר לתוחלת השירות (מעוגל)."""
+    index = round(years_left)
+    eligible = curve[curve["Year"] == index]
+    if not eligible.empty:
+        return eligible.iloc[0]["DiscountRate"]
+    # אם לא קיים בדיוק – קח הכי קרוב מלמטה
     eligible = curve[curve["Year"] <= years_left]
     if eligible.empty:
         return curve.iloc[0]["DiscountRate"]
     return eligible.sort_values("Year", ascending=False).iloc[0]["DiscountRate"]
+
+#בשביל לדבג
+def debug_print_row(row):
+    print("──────────── DEBUG – EMPLOYEE {} ────────────".format(row['employee_id']))
+    print(f"גיל (Age_31_12_2024): {row['Age_31_12_2024']:.2f}")
+    print(f"וותק (Seniority): {row['Seniority']:.2f}")
+    print(f"חלק מהשנה (fraction_2024): {row['fraction_2024']:.3f}")
+    print(f"אחוז סעיף 14 (Section14Pct): {row['Section14Pct']:.2%}")
+    print(f"פקטור אקטוארי (ActFactor): {row['ActFactor']:.4f}")
+    print(f"עלות שירות שוטף (SC): {row['SC']:.2f}")
+    print(f"תוחלת שירות מחושבת (YearsLeft): {row['YearsLeft']:.2f}")
+    print(f"שיעור ההיוון שנבחר (DiscRate): {row['DiscRate']:.4%}")
+    print(f"עלות היוון (IC): {row['IC']:.2f}")
+    print(f"PV פתיחה (PV_open): {row['PV_open']:.2f} | PV סגירה (PV_close): {row['PV_close']:.2f}")
+    print(f"הפסד/רווח אקטוארי (LiabGainLoss): {row['LiabGainLoss']:.2f}")
+    print(f"נכסים פתיחה (Assets_open): {row['Assets_open']:.2f} | סגירה (Assets_close): {row['Assets_close']:.2f}")
+    print(f"הפקדות (deposits): {row['deposits']:.2f} | משיכות (withdrawal_from_assets): {row['withdrawal_from_assets']:.2f}")
+    print(f"תשואה צפויה על נכסים (ER): {row['ER']:.2f}")
+    print(f"רווח/הפסד אקטוארי נכסים (AssetGainLoss): {row['AssetGainLoss']:.2f}")
+    print("────────────────────────────────────────────")
+
 
 ############################################################################
 # 3. CALCULATION STEPS #####################################################
@@ -174,14 +254,19 @@ def enrich_calculations(df: pd.DataFrame, curve: pd.DataFrame) -> pd.DataFrame:
     # 3.2 Actuarial factor
     divisor = df["LastSalary"] * df["Seniority"] * (1 - df["Section14Pct"])
     df["ActFactor"] = df["PV_close"] / divisor.replace({0: pd.NA}) # ----> לבדוק את השורה הזו !!!!!!!!!!!
+            #חישוב של פקטור אקטוארי לעובדים שיש להם תאריך עזיבה או עזבו במהלך השנה ונעניק להם פקטור אקטוארי 1.
+    left = df["leave_date"].notna() & (df["leave_date"] <= REPORT_DATE) # הגדרת דגל לעובדים שעזבו עד סוף 2024
+    df.loc[left, "ActFactor"] = 1  #לעוזבים נעניק פקטור אקטוארי 1.
 
     # 3.3 Service Cost (SC)
-    df["SC"] = (
-        df["LastSalary"] * df["fraction_2024"] * (1 - df["Section14Pct"]) * df["ActFactor"]
+    df["SC"] = np.where(
+            df["Section14Pct"] == 1, # אם סעיף 14 הוא 100 אז העלות שירות שוטף צריך להתאפס
+            0,
+            df["LastSalary"] * df["fraction_2024"] * (1 - df["Section14Pct"]) * df["ActFactor"]
     )
 
     # 3.4 Discount rate & Interest Cost (IC)
-    df["YearsLeft"] = df.apply(years_of_future_service, axis=1)
+    df["YearsLeft"] = df.apply(lambda row: compute_service_expectancy_survival_based(row["Age_31_12_2024"], row["gender"]), axis=1)
     df["DiscRate"]  = df["YearsLeft"].apply(lambda y: lookup_discount_rate(y, curve))
 
     # Formula per lecture: IC = [(PV_open * DiscRate) + ((SC – BenefitsPaid) × (DiscRate/2)) ]
@@ -200,6 +285,8 @@ def enrich_calculations(df: pd.DataFrame, curve: pd.DataFrame) -> pd.DataFrame:
         df["Assets_close"] - df["Assets_open"] - df["ER"] - df["deposits"] + df["withdrawal_from_assets"]
     )
 
+    # ◀️ הדפסת כל פרטי החישוב לעובד מסוים לבדיקה מלאה
+    df.apply(lambda row: debug_print_row(row) if row["employee_id"] == 64 else None, axis=1)
     return df
 
 ############################################################################
