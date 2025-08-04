@@ -52,7 +52,8 @@ from EconomicModel_V5 import (
 # שימוש בטבלאות מחלק א לחישוב התוחלת לשיעור ההיוון 
 _, _, male_mortality_table_age_Qx = read_male_mortality_table()
 _, _, Female_mortality_table_age_Qx = read_Female_mortality_table()
-
+male_q = male_mortality_table_age_Qx
+female_q = Female_mortality_table_age_Qx
 
 
 ###########################################################################
@@ -187,7 +188,7 @@ def compute_service_expectancy_survival_based(age: float, gender: str) -> float:
 
         # הסתברויות
         q_quit = leave_probabilities(curr_age, "total")
-        q_death = Female_mortality_table_age_Qx.get(curr_age, 0.0) if gender.strip().upper() == "F" else male_mortality_table_age_Qx.get(curr_age, 0.0)
+        q_death = female_q.get(curr_age, 0.0) if gender.strip().upper() == "F" else male_q.get(curr_age, 0.0)
 
         # הסתברות הישרדות לשנה הזו
         P_survive = 1 - q_quit - q_death
@@ -271,7 +272,7 @@ def enrich_calculations(df: pd.DataFrame, curve: pd.DataFrame) -> pd.DataFrame:
 
     # Formula per lecture: IC = [(PV_open * DiscRate) + ((SC – BenefitsPaid) × (DiscRate/2)) ]
     df["IC"] = ((df["PV_open"]* df["DiscRate"]) + ((df["SC"] - df["BenefitsPaid"])) * (df["DiscRate"]/2))
-
+    
     # 3.5 Liability actuarial gain / loss
     df["LiabGainLoss"] = (
         df["PV_close"] - df["PV_open"] - df["SC"] - df["IC"] + df["BenefitsPaid"]
