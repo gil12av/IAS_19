@@ -62,7 +62,7 @@ female_q = Female_mortality_table_age_Qx
 DATA_FOLDER = Path("./data")        # מיקום התיקייה data
 FILE_DATA1          = DATA_FOLDER / "data1.xlsx"
 FILE_OPEN_BALANCES  = DATA_FOLDER / "open_Balance.xlsx"
-FILE_PARTA_RESULTS  = DATA_FOLDER / "partA_output.xlsx"
+FILE_PARTA_RESULTS  = DATA_FOLDER / "result_part1.xlsx"
 FILE_OUTPUT         = "Part2_Results.xlsx"
 REPORT_DATE         = pd.Timestamp("2024-12-31")
 RET_AGE_M, RET_AGE_F = 67, 64  # גיל הפרישה לנשים וגברים 
@@ -271,7 +271,7 @@ def enrich_calculations(df: pd.DataFrame, curve: pd.DataFrame) -> pd.DataFrame:
     df["DiscRate"]  = df["YearsLeft"].apply(lambda y: lookup_discount_rate(y, curve))
 
     # Formula per lecture: IC = [(PV_open * DiscRate) + ((SC – BenefitsPaid) × (DiscRate/2)) ]
-    df["IC"] = ((df["PV_open"]* df["DiscRate"]) + ((df["SC"] - df["BenefitsPaid"])) * (df["DiscRate"]/2))
+    df["IC"] = (df["PV_open"] * df["DiscRate"]) + ((df["SC"] - df["BenefitsPaid"]) * (df["DiscRate"] * 0.5))
     
     # 3.5 Liability actuarial gain / loss
     df["LiabGainLoss"] = (
@@ -287,7 +287,7 @@ def enrich_calculations(df: pd.DataFrame, curve: pd.DataFrame) -> pd.DataFrame:
     )
 
     # ◀️ הדפסת כל פרטי החישוב לעובד מסוים לבדיקה מלאה
-    df.apply(lambda row: debug_print_row(row) if row["employee_id"] == 64 else None, axis=1)
+    df.apply(lambda row: debug_print_row(row) if row["employee_id"] == 69 else None, axis=1)
     return df
 
 ############################################################################
