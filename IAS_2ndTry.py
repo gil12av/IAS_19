@@ -1,39 +1,21 @@
 
 """
-IAS 19 – Part B: Annual roll‑forward (Service Cost, Interest Cost, Actuarial G/L)
+IAS 19(Part B): Annual roll-forward (Service Cost, Interest Cost, Actuarial G/L)
 ────────────────────────────────────────────────────────────────────────────
-This script builds on the results of Part A (present value of the obligation
-at 31‑12‑2024) and the opening balances to produce the movement schedule
+This script builds on the results of Part A (present value of the obligation
+at 31-12-2024) and the opening balances to produce the movement schedule
 required for the financial statements.
 
 Required input files (all in the same folder as the script unless a full
 path is supplied):
-• data1.xlsx                – two sheets:
-    ‑ "data"       : employee master file (see README below)
-    ‑ "הנחות"      : discount‑rate yield curve (columns: Year, DiscountRate)
-• open_Balance.xlsx         – opening balances (columns: employee_id, PV_open, Assets_open)
-• partA_output.xlsx         – Part A results (columns: employee_id, PV_close)
+• data1.xlsx                : two sheets:
+    - "data"                : employee master file (see README below)
+    - "הנחות"               : discount-rate yield curve (columns: Year, DiscountRate)
+• open_Balance.xlsx         : opening balances (columns: employee_id, PV_open, Assets_open)
+• partA_output.xlsx         : PartA results (columns: employee_id, PV_close)
 
 Output:
-• IAS19_partB_results.xlsx  – one sheet with the precise column layout you
-  provided (obligation section on the left, assets section on the right).
-
-README – mandatory columns in sheet "data" (header row is row 2 → header=1):
- 0 "מספר עובד"          ⇒ employee_id (unique key)
- 3 "מין"                 ⇒ gender  ("M"/"F") – determines retirement age 67/64
- 4 "תאריך לידה"          ⇒ date_of_birth (dd/mm/yyyy)
- 5 "תאריך תחילת עבודה"  ⇒ start_work_date
- 6 "שכר "                ⇒ LastSalary (ILS)
- 7 "תאריך  קבלת סעיף 14" ⇒ section14_start_date (not needed but useful)
- 8 "אחוז סעיף 14"        ⇒ Section14Pct (e.g. 100, 72 …) /100 will be used
- 9 "שווי נכס"            ⇒ Assets_close (fair value at year‑end, if known)
-10 "הפקדות"              ⇒ deposits (employer and employee contributions 2024)
-11 "תאריך עזיבה "        ⇒ leave_date (dd/mm/yyyy or "-"/blank if active)
-12 "תשלום מהנכס"        ⇒ withdrawal_from_assets (benefits paid from plan assets)
-13 "השלמה בצ'ק"          ⇒ completion_by_cheque (benefits paid directly by employer)
-
-Feel free to rename columns in Excel – just adjust the mapping dictionaries
-below accordingly.
+• Part2_Results.xlsx
 """
 
 from __future__ import annotations
@@ -168,11 +150,11 @@ def load_discount_curve(path: str | Path = FILE_DATA1) -> pd.DataFrame:
 # 2. HELPER FUNCTIONS ######################################################
 ############################################################################
 
+# כדי לחשב כמה שנים נותרו לכל עובד
 def years_of_future_service(row: pd.Series) -> float:
     """Expected future service from 31‑12‑2024 to statutory retirement age."""
     retirement_age = RET_AGE_F if row["gender"].strip().upper() == "F" else RET_AGE_M
     return max(retirement_age - row["Age_31_12_2024"], 0)
-
 
 
 # פונקציה לחישוב תוחלת לשיעור ההיוון
@@ -239,7 +221,7 @@ def debug_print_row(row):
 ############################################################################
 
 def enrich_calculations(df: pd.DataFrame, curve: pd.DataFrame) -> pd.DataFrame:
-    # 3.1 fraction of the year worked in 2024
+    # 3.1 חישוב אחוז מהשנה שעבד העובד ע״י שתי נקודות זמן ( תחילה וסוף שנה )
     start_2024 = pd.Timestamp("2024-01-01")
     end_2024   = REPORT_DATE
 
@@ -252,36 +234,36 @@ def enrich_calculations(df: pd.DataFrame, curve: pd.DataFrame) -> pd.DataFrame:
 
     df["fraction_2024"] = df.apply(fraction_2024, axis=1)
 
-    # 3.2 Actuarial factor
+    # 3.2 חישוב פקטור אקטוארי ע״י הנוסחה
     divisor = df["LastSalary"] * df["Seniority"] * (1 - df["Section14Pct"])
-    df["ActFactor"] = df["PV_close"] / divisor.replace({0: pd.NA}) # ----> לבדוק את השורה הזו !!!!!!!!!!!
+    df["ActFactor"] = df["PV_close"] / divisor.replace({0: pd.NA}) 
             #חישוב של פקטור אקטוארי לעובדים שיש להם תאריך עזיבה או עזבו במהלך השנה ונעניק להם פקטור אקטוארי 1.
     left = df["leave_date"].notna() & (df["leave_date"] <= REPORT_DATE) # הגדרת דגל לעובדים שעזבו עד סוף 2024
     df.loc[left, "ActFactor"] = 1  #לעוזבים נעניק פקטור אקטוארי 1.
 
-    # 3.3 Service Cost (SC)
+    # 3.3 חישוב של עלות שירות שוטף
     df["SC"] = np.where(
             df["Section14Pct"] == 1, # אם סעיף 14 הוא 100 אז העלות שירות שוטף צריך להתאפס
             0,
             df["LastSalary"] * df["fraction_2024"] * (1 - df["Section14Pct"]) * df["ActFactor"]
     )
 
-    # 3.4 Discount rate & Interest Cost (IC)
+    # 3.4 חישוב של עלות היוון
     df["YearsLeft"] = df.apply(lambda row: compute_service_expectancy_survival_based(row["Age_31_12_2024"], row["gender"]), axis=1)
     df["DiscRate"]  = df["YearsLeft"].apply(lambda y: lookup_discount_rate(y, curve))
-
-    # Formula per lecture: IC = [(PV_open * DiscRate) + ((SC – BenefitsPaid) × (DiscRate/2)) ]
     df["IC"] = (df["PV_open"] * df["DiscRate"]) + ((df["SC"] - df["BenefitsPaid"]) * (df["DiscRate"] * 0.5))
     
-    # 3.5 Liability actuarial gain / loss
+    # 3.5 חישוב הפסדים או רווחים אקטואריים
     df["LiabGainLoss"] = (
         df["PV_close"] - df["PV_open"] - df["SC"] - df["IC"] + df["BenefitsPaid"]
     )
+    # -------------- עד כאן צד ההתחייבות -------------------
 
-    # 3.6 Expected return on assets (same rate as discount unless curve has separate column)
+    # -------------- חישוב של צד הנכסים --------------------
+    # 3.6 חישוב של תשואה צפויה לנכסי התוכנית
     df["ER"] = ((df["Assets_open"] * df["DiscRate"]) + ((df["deposits"] - df["withdrawal_from_assets"]) * (df["DiscRate"]/2)))
 
-    # 3.7 Asset actuarial gain / loss
+    # 3.7 חישוב של רווחים והפסדים אקטואריים (צד נכסים)
     df["AssetGainLoss"] = (
         df["Assets_close"] - df["Assets_open"] - df["ER"] - df["deposits"] + df["withdrawal_from_assets"]
     )
